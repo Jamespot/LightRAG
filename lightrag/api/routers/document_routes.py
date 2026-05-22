@@ -11,7 +11,7 @@ import aiofiles
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Literal
+from typing import Awaitable, Callable, Dict, List, Optional, Any, Literal
 from io import BytesIO
 from fastapi import (
     APIRouter,
@@ -19,6 +19,7 @@ from fastapi import (
     Depends,
     File,
     HTTPException,
+    Request,
     UploadFile,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -2087,7 +2088,10 @@ async def background_delete_documents(
 
 
 def create_document_routes(
-    rag: LightRAG, doc_manager: DocumentManager, api_key: Optional[str] = None
+    rag: LightRAG,
+    doc_manager: DocumentManager,
+    api_key: Optional[str] = None,
+    workspace_resolver: Optional[Callable[[Request], Awaitable[LightRAG]]] = None,
 ):
     # Fresh router per call — see the note above the temp_prefix constant.
     router = APIRouter(
@@ -2097,6 +2101,16 @@ def create_document_routes(
 
     # Create combined auth dependency for document routes
     combined_auth = get_combined_auth_dependency(api_key)
+
+    async def _resolve_rag(http_request: Request) -> LightRAG:
+        """Return the RAG instance for this HTTP request.
+
+        Falls back to the closure `rag` when no workspace resolver is wired up
+        (backward-compatible with the upstream single-workspace deployment).
+        """
+        if workspace_resolver is None:
+            return rag
+        return await workspace_resolver(http_request)
 
     @router.post(
         "/scan", response_model=ScanResponse, dependencies=[Depends(combined_auth)]
@@ -2127,7 +2141,9 @@ def create_document_routes(
         "/upload", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
     )
     async def upload_to_input_dir(
-        background_tasks: BackgroundTasks, file: UploadFile = File(...)
+        background_tasks: BackgroundTasks,
+        http_request: Request,
+        file: UploadFile = File(...),
     ):
         """
         Upload a file to the input directory and index it.
@@ -2180,6 +2196,7 @@ def create_document_routes(
         Raises:
             HTTPException: If the file type is not supported (400), file too large (413), or other errors occur (500).
         """
+        rag_instance = await _resolve_rag(http_request)
         try:
             # Sanitize filename to prevent Path Traversal attacks
             safe_filename = sanitize_filename(file.filename, doc_manager.input_dir)
@@ -2212,7 +2229,7 @@ def create_document_routes(
                     )
 
             # Check if filename already exists in doc_status storage
-            existing_doc_data = await rag.doc_status.get_doc_by_file_path(safe_filename)
+            existing_doc_data = await rag_instance.doc_status.get_doc_by_file_path(safe_filename)
             if existing_doc_data:
                 # Get document status and track_id from existing document
                 status = existing_doc_data.get("status", "unknown")
@@ -2275,7 +2292,7 @@ def create_document_routes(
             track_id = generate_track_id("upload")
 
             # Add to background tasks and get track_id
-            background_tasks.add_task(pipeline_index_file, rag, file_path, track_id)
+            background_tasks.add_task(pipeline_index_file, rag_instance, file_path, track_id)
 
             return InsertResponse(
                 status="success",
@@ -2866,6 +2883,7 @@ def create_document_routes(
     async def delete_document(
         delete_request: DeleteDocRequest,
         background_tasks: BackgroundTasks,
+        http_request: Request,
     ) -> DeleteDocByIdResponse:
         """
         Delete documents and all their associated data by their IDs using background processing.
@@ -2892,6 +2910,7 @@ def create_document_routes(
         """
         doc_ids = delete_request.doc_ids
 
+        rag_instance = await _resolve_rag(http_request)
         try:
             from lightrag.kg.shared_storage import (
                 get_namespace_data,
@@ -2899,10 +2918,10 @@ def create_document_routes(
             )
 
             pipeline_status = await get_namespace_data(
-                "pipeline_status", workspace=rag.workspace
+                "pipeline_status", workspace=rag_instance.workspace
             )
             pipeline_status_lock = get_namespace_lock(
-                "pipeline_status", workspace=rag.workspace
+                "pipeline_status", workspace=rag_instance.workspace
             )
 
             # Check if pipeline is busy with proper lock
@@ -2917,7 +2936,7 @@ def create_document_routes(
             # Add deletion task to background tasks
             background_tasks.add_task(
                 background_delete_documents,
-                rag,
+                rag_instance,
                 doc_manager,
                 doc_ids,
                 delete_request.delete_file,
@@ -3048,7 +3067,7 @@ def create_document_routes(
         response_model=TrackStatusResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def get_track_status(track_id: str) -> TrackStatusResponse:
+    async def get_track_status(track_id: str, http_request: Request) -> TrackStatusResponse:
         """
         Get the processing status of documents by tracking ID.
 
@@ -3067,6 +3086,7 @@ def create_document_routes(
         Raises:
             HTTPException: If track_id is invalid (400) or an error occurs (500).
         """
+        rag_instance = await _resolve_rag(http_request)
         try:
             # Validate track_id
             if not track_id or not track_id.strip():
@@ -3075,7 +3095,7 @@ def create_document_routes(
             track_id = track_id.strip()
 
             # Get documents by track_id
-            docs_by_track_id = await rag.aget_docs_by_track_id(track_id)
+            docs_by_track_id = await rag_instance.aget_docs_by_track_id(track_id)
 
             # Convert to response format
             documents = []

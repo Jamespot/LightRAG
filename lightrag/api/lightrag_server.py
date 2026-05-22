@@ -9,6 +9,7 @@ from fastapi.openapi.docs import (
     get_swagger_ui_html,
     get_swagger_ui_oauth2_redirect_html,
 )
+import asyncio
 import json
 import os
 import re
@@ -374,8 +375,18 @@ def create_app(args):
             yield
 
         finally:
-            # Clean up database connections
+            # Clean up database connections (default + pooled workspaces)
             await rag.finalize_storages()
+            pool = getattr(app.state, "rag_pool", {}) or {}
+            for ws_name, ws_rag in list(pool.items()):
+                if ws_rag is rag:
+                    continue  # already finalized above
+                try:
+                    await ws_rag.finalize_storages()
+                except Exception as e:
+                    logger.warning(
+                        f"[multi-workspace] finalize failed for workspace='{ws_name}': {e}"
+                    )
 
             if "LIGHTRAG_GUNICORN_MODE" not in os.environ:
                 # Only perform cleanup in Uvicorn single-process mode
@@ -1163,51 +1174,106 @@ def create_app(args):
         name=args.simulated_model_name, tag=args.simulated_model_tag
     )
 
-    # Initialize RAG with unified configuration
+    # Initialize RAG with unified configuration.
+    # Kwargs are captured in a dict so that per-workspace clones (multi-workspace HTTP)
+    # can be built on demand without re-running the expensive LLM/embedding setup.
+    _rag_kwargs_base = dict(
+        working_dir=args.working_dir,
+        llm_model_func=create_llm_model_func(args.llm_binding),
+        llm_model_name=args.llm_model,
+        llm_model_max_async=args.max_async,
+        summary_max_tokens=args.summary_max_tokens,
+        summary_context_size=args.summary_context_size,
+        chunk_token_size=int(args.chunk_size),
+        chunk_overlap_token_size=int(args.chunk_overlap_size),
+        llm_model_kwargs=create_llm_model_kwargs(
+            args.llm_binding, args, llm_timeout
+        ),
+        embedding_func=embedding_func,
+        default_llm_timeout=llm_timeout,
+        default_embedding_timeout=embedding_timeout,
+        kv_storage=args.kv_storage,
+        graph_storage=args.graph_storage,
+        vector_storage=args.vector_storage,
+        doc_status_storage=args.doc_status_storage,
+        vector_db_storage_cls_kwargs={
+            "cosine_better_than_threshold": args.cosine_threshold
+        },
+        enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
+        enable_llm_cache=args.enable_llm_cache,
+        rerank_model_func=rerank_model_func,
+        max_parallel_insert=args.max_parallel_insert,
+        max_graph_nodes=args.max_graph_nodes,
+        addon_params={
+            "language": args.summary_language,
+            "entity_types": args.entity_types,
+        },
+        ollama_server_infos=ollama_server_infos,
+    )
+
     try:
-        rag = LightRAG(
-            working_dir=args.working_dir,
-            workspace=args.workspace,
-            llm_model_func=create_llm_model_func(args.llm_binding),
-            llm_model_name=args.llm_model,
-            llm_model_max_async=args.max_async,
-            summary_max_tokens=args.summary_max_tokens,
-            summary_context_size=args.summary_context_size,
-            chunk_token_size=int(args.chunk_size),
-            chunk_overlap_token_size=int(args.chunk_overlap_size),
-            llm_model_kwargs=create_llm_model_kwargs(
-                args.llm_binding, args, llm_timeout
-            ),
-            embedding_func=embedding_func,
-            default_llm_timeout=llm_timeout,
-            default_embedding_timeout=embedding_timeout,
-            kv_storage=args.kv_storage,
-            graph_storage=args.graph_storage,
-            vector_storage=args.vector_storage,
-            doc_status_storage=args.doc_status_storage,
-            vector_db_storage_cls_kwargs={
-                "cosine_better_than_threshold": args.cosine_threshold
-            },
-            enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
-            enable_llm_cache=args.enable_llm_cache,
-            rerank_model_func=rerank_model_func,
-            max_parallel_insert=args.max_parallel_insert,
-            max_graph_nodes=args.max_graph_nodes,
-            addon_params={
-                "language": args.summary_language,
-                "entity_types": args.entity_types,
-            },
-            ollama_server_infos=ollama_server_infos,
-        )
+        rag = LightRAG(workspace=args.workspace, **_rag_kwargs_base)
     except Exception as e:
         logger.error(f"Failed to initialize LightRAG: {e}")
         raise
 
+    # ---- Multi-workspace HTTP pool (Jamespot patch) -------------------------
+    # Routes that accept the LIGHTRAG-WORKSPACE header resolve their RAG instance
+    # via this pool. The default workspace (server-wide) is pre-populated so the
+    # global `rag` and pool entries stay in sync.
+    _rag_pool: dict[str, LightRAG] = {args.workspace: rag}
+    _rag_pool_lock = asyncio.Lock()
+
+    async def get_rag_for_workspace(ws: str) -> LightRAG:
+        """Return a LightRAG instance bound to `ws`, creating it on first use."""
+        if ws in _rag_pool:
+            return _rag_pool[ws]
+        async with _rag_pool_lock:
+            if ws not in _rag_pool:
+                logger.info(
+                    f"[multi-workspace] Initializing LightRAG for workspace='{ws}'"
+                )
+                new_rag = LightRAG(workspace=ws, **_rag_kwargs_base)
+                await new_rag.initialize_storages()
+                _rag_pool[ws] = new_rag
+            return _rag_pool[ws]
+
+    async def require_workspace_rag(request: Request) -> LightRAG:
+        """FastAPI dependency: resolve RAG from LIGHTRAG-WORKSPACE header.
+
+        Raises 400 when the header is missing or empty — there is no implicit
+        fallback to the default workspace, so multi-tenant routes cannot leak
+        data into the wrong workspace by accident.
+        """
+        ws = get_workspace_from_request(request)
+        if not ws:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "LIGHTRAG-WORKSPACE header is required for this endpoint "
+                    "(multi-tenant isolation enforced)."
+                ),
+            )
+        return await get_rag_for_workspace(ws)
+
+    # Expose on app.state so background tasks / lifespan can iterate the pool.
+    app.state.rag_pool = _rag_pool
+    app.state.get_rag_for_workspace = get_rag_for_workspace
+    # ------------------------------------------------------------------------
+
     # Add routes
     # root_path is set on the app for reverse proxy support;
     # routes stay at their natural paths and are prefixed by the proxy or uvicorn --root-path
-    app.include_router(create_document_routes(rag, doc_manager, api_key))
-    app.include_router(create_query_routes(rag, api_key, args.top_k))
+    app.include_router(
+        create_document_routes(
+            rag, doc_manager, api_key, workspace_resolver=require_workspace_rag
+        )
+    )
+    app.include_router(
+        create_query_routes(
+            rag, api_key, args.top_k, workspace_resolver=require_workspace_rag
+        )
+    )
     app.include_router(create_graph_routes(rag, api_key))
 
     # Add Ollama API routes
