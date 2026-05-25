@@ -2241,12 +2241,19 @@ def create_document_routes(
                     track_id=existing_track_id,
                 )
 
-            file_path = doc_manager.input_dir / safe_filename
-            # Check if file already exists in file system
+            # Filesystem isolation per workspace: deux KBs distinctes (ex. kb_42
+            # et kb_88) doivent pouvoir uploader un fichier portant le même nom
+            # sans collision. Le `safe_filename` reste le basename original
+            # côté KG / references (pas de pollution de la réponse LLM).
+            # On utilise `base_input_dir` (et pas `input_dir`, qui pointe déjà
+            # vers le sous-dossier du workspace par défaut du serveur).
+            workspace_dir = doc_manager.base_input_dir / rag_instance.workspace
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            file_path = workspace_dir / safe_filename
             if file_path.exists():
                 return InsertResponse(
                     status="duplicated",
-                    message=f"File '{safe_filename}' already exists in the input directory.",
+                    message=f"File '{safe_filename}' already exists in the input directory for workspace '{rag_instance.workspace}'.",
                     track_id="",
                 )
 
