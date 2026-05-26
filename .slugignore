@@ -1,5 +1,0 @@
-# Fichiers exclus du build Scalingo. Permet au buildpack Python de ne
-# détecter qu'un seul gestionnaire de packages (pip via requirements.txt).
-# uv.lock est conservé dans le repo pour cohérence avec l'upstream HKUDS
-# (et faciliter une éventuelle PR upstream), mais n'est pas envoyé au build.
-uv.lock
