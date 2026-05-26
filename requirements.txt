@@ -1,0 +1,5 @@
+# Buildpack Python Scalingo installe via `pip install -r requirements.txt`.
+# On délègue à pyproject.toml + extra `api` qui contient toutes les dépendances
+# nécessaires pour faire tourner le serveur (FastAPI, openai, pgvector deps, etc.).
+# Garder synchro avec [project.optional-dependencies].api dans pyproject.toml.
+.[api]
