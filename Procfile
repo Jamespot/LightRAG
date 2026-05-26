@@ -1,1 +1,1 @@
-web: lightrag-server --host 0.0.0.0 --port $PORT --workspace ${WORKSPACE:-default}
+web: lightrag-gunicorn --workers 1
