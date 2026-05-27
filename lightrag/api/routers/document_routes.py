@@ -474,6 +474,11 @@ class DocStatusResponse(BaseModel):
     chunks_count: Optional[int] = Field(
         default=None, description="Number of chunks the document was split into"
     )
+    chunks_done: Optional[int] = Field(
+        default=None,
+        description="Number of chunks already extracted (entities/relations written to KG). "
+                    "Useful for displaying live progress (chunks_done / chunks_count)."
+    )
     error_msg: Optional[str] = Field(
         default=None, description="Error message if processing failed"
     )
@@ -3119,6 +3124,7 @@ def create_document_routes(
                         updated_at=format_datetime(doc_status.updated_at),
                         track_id=doc_status.track_id,
                         chunks_count=doc_status.chunks_count,
+                        chunks_done=len(doc_status.chunks_list or []),
                         error_msg=doc_status.error_msg,
                         metadata=doc_status.metadata,
                         file_path=normalize_file_path(doc_status.file_path),
