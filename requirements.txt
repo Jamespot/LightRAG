@@ -3,3 +3,8 @@
 # nécessaires pour faire tourner le serveur (FastAPI, openai, pgvector deps, etc.).
 # Garder synchro avec [project.optional-dependencies].api dans pyproject.toml.
 .[api]
+
+# MongoDB pour LIGHTRAG_GRAPH_STORAGE=MongoGraphStorage.
+# Le filesystem Scalingo n'étant pas persistant, NetworkXStorage perd le
+# graphe à chaque restart — Mongo est notre backend graphe persistant.
+pymongo>=4.0.0,<5.0.0
