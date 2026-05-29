@@ -7,6 +7,14 @@
 # → on extrait chaque composant avec une regex bash (parameter expansion).
 
 if [ -n "$SCALINGO_OPENSEARCH_URL" ]; then
+  # Détection du schéma (http vs https) — Scalingo expose certaines instances
+  # en http via le Private Network interne, d'autres en https. On lit ce qui
+  # est dans l'URL plutôt que de hardcoder.
+  case "$SCALINGO_OPENSEARCH_URL" in
+    https://*) export OPENSEARCH_USE_SSL=true  ;;
+    http://*)  export OPENSEARCH_USE_SSL=false ;;
+  esac
+
   url="${SCALINGO_OPENSEARCH_URL#https://}"
   url="${url#http://}"
   creds="${url%@*}"
@@ -15,10 +23,8 @@ if [ -n "$SCALINGO_OPENSEARCH_URL" ]; then
   export OPENSEARCH_HOSTS="$hostport"
   export OPENSEARCH_USER="${creds%%:*}"
   export OPENSEARCH_PASSWORD="${creds#*:}"
-  export OPENSEARCH_USE_SSL=true
-  # Scalingo expose un cert SSL signé par eux-mêmes, non reconnu par les CA
-  # par défaut du système. La connexion reste chiffrée TLS, on désactive
-  # juste la validation du CA (équivalent à scalingo-cli qui passe
-  # --tlsAllowInvalidCertificates).
+  # En https : Scalingo expose un cert SSL signé par eux-mêmes, non reconnu par
+  # les CA système. La connexion reste chiffrée TLS, on désactive juste la
+  # validation du CA. En http : flag ignoré par opensearch-py.
   export OPENSEARCH_VERIFY_CERTS=false
 fi
