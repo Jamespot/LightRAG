@@ -3361,7 +3361,9 @@ def create_document_routes(
         response_model=ReprocessResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def reprocess_failed_documents(background_tasks: BackgroundTasks):
+    async def reprocess_failed_documents(
+        background_tasks: BackgroundTasks, http_request: Request
+    ):
         """
         Reprocess failed and pending documents.
 
@@ -3378,6 +3380,11 @@ def create_document_routes(
         pipeline status. The reprocessed documents retain their original track_id from
         initial upload, so use their original track_id to monitor progress.
 
+        Multi-workspace : resolves the workspace from the `LIGHTRAG-WORKSPACE`
+        header (or wherever workspace_resolver looks). Without this fix, the
+        endpoint reprocessed the default workspace regardless of the header,
+        which silently no-op'd for tenant retries — see upstream issue tracking.
+
         Returns:
             ReprocessResponse: Response with status and message.
                 track_id is always empty string because reprocessed documents retain
@@ -3386,11 +3393,14 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while initiating reprocessing (500).
         """
+        rag_instance = await _resolve_rag(http_request)
         try:
-            # Start the reprocessing in the background
-            # Note: Reprocessed documents retain their original track_id from initial upload
-            background_tasks.add_task(rag.apipeline_process_enqueue_documents)
-            logger.info("Reprocessing of failed documents initiated")
+            # Start the reprocessing in the background on the resolved workspace.
+            # Note: Reprocessed documents retain their original track_id from initial upload.
+            background_tasks.add_task(rag_instance.apipeline_process_enqueue_documents)
+            logger.info(
+                f"[{rag_instance.workspace}] Reprocessing of failed documents initiated"
+            )
 
             return ReprocessResponse(
                 status="reprocessing_started",
