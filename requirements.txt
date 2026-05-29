@@ -4,7 +4,10 @@
 # Garder synchro avec [project.optional-dependencies].api dans pyproject.toml.
 .[api]
 
-# MongoDB pour LIGHTRAG_GRAPH_STORAGE=MongoGraphStorage.
+# OpenSearch pour LIGHTRAG_GRAPH_STORAGE=OpenSearchGraphStorage.
 # Le filesystem Scalingo n'étant pas persistant, NetworkXStorage perd le
-# graphe à chaque restart — Mongo est notre backend graphe persistant.
-pymongo>=4.0.0,<5.0.0
+# graphe à chaque restart. On était parti sur Mongo, mais Scalingo ne
+# propose que MongoDB 4.0 (wire version 7, trop ancienne pour pymongo 4.x).
+# OpenSearch chez Scalingo est sur une version récente → backend graphe
+# persistant viable.
+opensearch-py>=3.0.0,<4.0.0
