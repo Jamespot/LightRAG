@@ -15,6 +15,7 @@ from openai import (
     APIConnectionError,
     RateLimitError,
     APITimeoutError,
+    InternalServerError,
 )
 from tenacity import (
     retry,
@@ -197,13 +198,20 @@ def create_openai_async_client(
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=4, max=10),
+    # 6 tentatives avec backoff exponentiel jusqu'à 90s (~2 min de patience au
+    # total) pour absorber les saturations transitoires de l'inférence (ex.
+    # Cloud Temple 503). Reste dans le budget du worker (LLM_TIMEOUT*2).
+    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=4, min=4, max=90),
     retry=(
         retry_if_exception_type(RateLimitError)
         | retry_if_exception_type(APIConnectionError)
         | retry_if_exception_type(APITimeoutError)
         | retry_if_exception_type(InvalidResponseError)
+        # 503 / 5xx renvoyés par le provider en saturation : openai-python les
+        # mappe sur InternalServerError. Sans cette ligne, une saturation
+        # transitoire faisait échouer le chunk après ~6s (cf. régression).
+        | retry_if_exception_type(InternalServerError)
     ),
 )
 async def openai_complete_if_cache(
@@ -737,12 +745,15 @@ async def nvidia_openai_complete(
     supports_asymmetric=True,
 )
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=4, max=60),
+    # Idem que la complétion : on absorbe les saturations 503 transitoires côté
+    # embeddings (granite-embedding peut aussi saturer chez le provider).
+    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=4, min=4, max=90),
     retry=(
         retry_if_exception_type(RateLimitError)
         | retry_if_exception_type(APIConnectionError)
         | retry_if_exception_type(APITimeoutError)
+        | retry_if_exception_type(InternalServerError)
     ),
 )
 async def openai_embed(
