@@ -20,7 +20,7 @@ from openai import (
 from tenacity import (
     retry,
     stop_after_attempt,
-    wait_exponential,
+    wait_random_exponential,
     retry_if_exception_type,
 )
 from lightrag.utils import (
@@ -198,11 +198,14 @@ def create_openai_async_client(
 
 
 @retry(
-    # 6 tentatives avec backoff exponentiel jusqu'à 90s (~2 min de patience au
-    # total) pour absorber les saturations transitoires de l'inférence (ex.
-    # Cloud Temple 503). Reste dans le budget du worker (LLM_TIMEOUT*2).
+    # 6 tentatives pour absorber les saturations transitoires de l'inférence
+    # (ex. Cloud Temple 503). wait_random_exponential = backoff exponentiel
+    # AVEC jitter : crucial quand MAX_ASYNC chunks saturent ensemble — sans
+    # jitter ils retenteraient en lockstep et marteleraient le provider pile
+    # quand il est déjà saturé (thundering herd / retry storm). Le jitter
+    # désynchronise les tentatives. Budget : tient dans le worker (LLM_TIMEOUT*2).
     stop=stop_after_attempt(6),
-    wait=wait_exponential(multiplier=4, min=4, max=90),
+    wait=wait_random_exponential(multiplier=4, min=4, max=90),
     retry=(
         retry_if_exception_type(RateLimitError)
         | retry_if_exception_type(APIConnectionError)
@@ -745,10 +748,13 @@ async def nvidia_openai_complete(
     supports_asymmetric=True,
 )
 @retry(
-    # Idem que la complétion : on absorbe les saturations 503 transitoires côté
-    # embeddings (granite-embedding peut aussi saturer chez le provider).
-    stop=stop_after_attempt(6),
-    wait=wait_exponential(multiplier=4, min=4, max=90),
+    # On absorbe aussi les 503 côté embeddings, MAIS avec un budget plus court :
+    # le worker embed a un timeout = EMBEDDING_TIMEOUT*2 (~60s), bien plus serré
+    # que le LLM (LLM_TIMEOUT*2). Une chaîne de retry calquée sur la complétion
+    # (~2 min de waits) serait tuée par le worker avant d'épuiser ses tentatives.
+    # 4 tentatives avec waits courts jittered tiennent largement dans 60s.
+    stop=stop_after_attempt(4),
+    wait=wait_random_exponential(multiplier=1, min=1, max=10),
     retry=(
         retry_if_exception_type(RateLimitError)
         | retry_if_exception_type(APIConnectionError)

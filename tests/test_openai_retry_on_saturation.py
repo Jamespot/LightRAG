@@ -149,9 +149,25 @@ def test_both_retry_decorators_handle_internal_server_error():
         )
 
 
-def test_retry_budget_stays_resilient():
+def test_retries_use_jitter_against_thundering_herd():
+    # Sans jitter (wait_exponential pur), N chunks saturés ensemble retentent
+    # en lockstep et martèlent le provider pile quand il sature. Le jitter
+    # (wait_random_exponential) désynchronise. Invariant critique anti-storm.
     for block in _decorator_blocks():
-        assert "stop_after_attempt(6)" in block, (
-            "Le nombre de tentatives a été réduit — le retry pourrait ne plus "
-            "couvrir une saturation transitoire de ~2 min."
+        assert "wait_random_exponential" in block, (
+            "Un décorateur @retry utilise un backoff SANS jitter — risque de "
+            "retry storm (thundering herd) qui aggrave la saturation provider."
         )
+        assert "wait_exponential(" not in block.replace("wait_random_exponential", ""), (
+            "Backoff sans jitter détecté."
+        )
+
+
+def test_completion_retry_is_resilient_embed_is_short():
+    # La complétion doit tenir longtemps (budget LLM_TIMEOUT*2, gros), l'embed
+    # doit rester court (budget EMBEDDING_TIMEOUT*2 ~60s, serré). On vérifie que
+    # les 2 ne sont pas dimensionnés à l'identique (régression : embed calqué
+    # sur la complétion dépassait son budget worker).
+    completion, embed = _decorator_blocks()
+    assert "stop_after_attempt(6)" in completion
+    assert "stop_after_attempt(4)" in embed
