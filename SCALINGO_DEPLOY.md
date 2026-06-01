@@ -50,11 +50,35 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 ## 3. Variables d'environnement à configurer
 
+> ### ⭐ Choix du modèle LLM (extraction KG) — IMPORTANT
+> Utiliser un modèle **MoE** (Mixture of Experts), PAS un modèle dense.
+> **Recommandé recette ET prod : `qwen3.6:35b`** (`Qwen/Qwen3.6-35B-A3B-FP8`).
+>
+> Pourquoi : l'extraction d'entités/relations envoie jusqu'à `MAX_ASYNC` appels
+> LLM **concurrents** à Cloud Temple. Un modèle **dense** (ex. `qwen3.6:27b`)
+> active tous ses params à chaque appel → peu de requêtes par GPU → **sature dès
+> 4-8 concurrents** (queues de 60-94s, timeouts worker à 600s, indexations
+> échouées). Un modèle **MoE A3B** n'active que 3B params par requête → un GPU en
+> sert beaucoup plus en parallèle → **encaisse 8-16 concurrents sans broncher**
+> (mesuré : p50 ~10-15s, 0 échec).
+>
+> Mesure empirique (01/06/2026, prompts d'extraction réalistes) :
+> | Concurrence | qwen3.6:35b (MoE) | qwen3.6:27b (dense) |
+> |---|---|---|
+> | N=8  | p50 10.2s / max 11.6s | p50 17.7s / **max 94s** |
+> | N=16 | p50 14.8s / max 16.8s | p50 34.8s / **max 94s** |
+>
+> `qwen3.6:35b` est de la **même famille** que le 27b → conventions d'extraction
+> identiques → cohérence du graphe préservée, et il est même **plus rapide**
+> (144 vs 122 tok/s). Alternatives MoE valables : `nemotron-cascade:30b`,
+> `mistral-small4:119b`. Éviter tout modèle **dense** pour l'indexation.
+
 ```bash
 # === LLM Cloud Temple (SecNumCloud, OpenAI-compatible) ===
+# qwen3.6:35b = MoE A3B (voir l'encadré ci-dessus) — encaisse la concurrence.
 scalingo --app lightrag-safebrain-recette env-set \
   LLM_BINDING=openai \
-  LLM_MODEL=qwen3-2507-gptq:235b \
+  LLM_MODEL=qwen3.6:35b \
   LLM_BINDING_HOST=https://api.ai.cloud-temple.com/v1 \
   LLM_BINDING_API_KEY=<CLE_CLOUD_TEMPLE>
 
@@ -66,12 +90,17 @@ scalingo --app lightrag-safebrain-recette env-set \
   EMBEDDING_BINDING_HOST=https://api.ai.cloud-temple.com/v1 \
   EMBEDDING_BINDING_API_KEY=<CLE_CLOUD_TEMPLE>
 
-# === Storage backends (Postgres dispo via SCALINGO_POSTGRESQL_URL) ===
+# === Storage backends ===
+# KV / vector / doc_status en Postgres. GRAPHE en OpenSearch — PAS NetworkX :
+# le filesystem Scalingo n'est pas persistant, NetworkXStorage perd donc tout
+# le graphe à chaque restart/déploiement. OpenSearch (addon Scalingo) est
+# persistant. Requiert : addon OpenSearch attaché + `.profile.d/opensearch.sh`
+# (mappe SCALINGO_OPENSEARCH_URL → OPENSEARCH_HOSTS/USER/PASSWORD) + opensearch-py.
 scalingo --app lightrag-safebrain-recette env-set \
   LIGHTRAG_KV_STORAGE=PGKVStorage \
   LIGHTRAG_VECTOR_STORAGE=PGVectorStorage \
   LIGHTRAG_DOC_STATUS_STORAGE=PGDocStatusStorage \
-  LIGHTRAG_GRAPH_STORAGE=NetworkXStorage
+  LIGHTRAG_GRAPH_STORAGE=OpenSearchGraphStorage
 
 # Postgres : Scalingo expose SCALINGO_POSTGRESQL_URL. LightRAG attend des vars
 # discrètes — on les dérive via une petite couche. Si LightRAG ne sait pas
@@ -89,9 +118,14 @@ scalingo --app lightrag-safebrain-recette env-set \
   LIGHTRAG_API_KEY=<GENERER_UNE_CLE_FORTE_64_CHAR>
 
 # === Perf (peut s'ajuster sans redéploiement) ===
+# MAX_ASYNC = nb d'appels LLM concurrents (sémaphore global). Avec un modèle MoE
+# (qwen3.6:35b) on tient confortablement 8-16. NE PAS monter trop haut sur un
+# modèle dense (sature). 8 = sûr ; 12-16 = plus rapide si le MoE encaisse.
+# LLM_TIMEOUT=300 → timeout worker = 600s (LLM_TIMEOUT*2).
 scalingo --app lightrag-safebrain-recette env-set \
-  MAX_ASYNC=24 \
-  MAX_PARALLEL_INSERT=8
+  MAX_ASYNC=8 \
+  MAX_PARALLEL_INSERT=8 \
+  LLM_TIMEOUT=300
 ```
 
 **Notes** :
