@@ -543,6 +543,8 @@ def create_app(args):
             **kwargs,
         ) -> str:
             from lightrag.llm.openai import openai_complete_if_cache
+            from lightrag.token_usage import record_usage
+            from lightrag.utils import TokenTracker
 
             keyword_extraction = kwargs.pop("keyword_extraction", None)
             if keyword_extraction:
@@ -555,7 +557,14 @@ def create_app(args):
             if config_cache.openai_llm_options:
                 kwargs.update(config_cache.openai_llm_options)
 
-            return await openai_complete_if_cache(
+            # Capture per-call token usage for document-level attribution. We only
+            # inject our own tracker when the caller hasn't supplied one (queries
+            # may pass theirs). record_usage() is a no-op outside an ingestion doc
+            # scope, so query calls cost nothing here.
+            tracker = kwargs.get("token_tracker") or TokenTracker()
+            kwargs["token_tracker"] = tracker
+
+            result = await openai_complete_if_cache(
                 args.llm_model,
                 prompt,
                 system_prompt=system_prompt,
@@ -564,6 +573,8 @@ def create_app(args):
                 api_key=args.llm_binding_api_key,
                 **kwargs,
             )
+            record_usage(tracker.get_usage(), model=args.llm_model)
+            return result
 
         return optimized_openai_alike_model_complete
 

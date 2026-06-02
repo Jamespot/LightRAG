@@ -85,6 +85,7 @@ from lightrag.base import (
     QueryResult,
 )
 from lightrag.namespace import NameSpace
+from lightrag.token_usage import set_doc_scope, persist_doc_usage
 from lightrag.operate import (
     chunking_by_token_size,
     extract_entities,
@@ -1898,6 +1899,12 @@ class LightRAG:
 
                     async with semaphore:
                         nonlocal processed_count
+                        # Bind this document's (workspace, doc_id) scope so every
+                        # LLM call made below is attributed to it for token
+                        # accounting. asyncio.gather runs each process_document in
+                        # its own context copy, so the scope is isolated per doc
+                        # and discarded with the task — no reset needed.
+                        set_doc_scope(self.workspace, doc_id)
                         # Initialize to prevent UnboundLocalError in error handling
                         first_stage_tasks = []
                         entity_relation_task = None
@@ -2179,6 +2186,14 @@ class LightRAG:
 
                                 # Call _insert_done after processing each file
                                 await self._insert_done()
+
+                                # Flush this document's accumulated LLM token
+                                # usage to PostgreSQL now that it is PROCESSED.
+                                await persist_doc_usage(
+                                    self.workspace,
+                                    doc_id,
+                                    getattr(self.doc_status, "db", None),
+                                )
 
                                 async with pipeline_status_lock:
                                     log_message = f"Completed processing file {current_file_number}/{total_files}: {file_path}"

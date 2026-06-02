@@ -14,6 +14,7 @@ import os
 import re
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
@@ -405,6 +406,15 @@ class UnlimitedSemaphore:
         pass
 
 
+# Per-document token attribution scope (workspace, doc_id), or None outside
+# ingestion. Defined here (rather than in token_usage.py) because the priority
+# limiter below must propagate it across the queue → worker boundary: workers are
+# long-lived tasks whose context is frozen at creation, so they do not inherit the
+# contextvar set by process_document. We capture it at enqueue time and restore it
+# in the worker around the actual call. See token_usage.py for the consumer side.
+doc_token_scope: ContextVar = ContextVar("lightrag_doc_token_scope", default=None)
+
+
 @dataclass
 class TaskState:
     """Task state tracking for priority queue management"""
@@ -415,6 +425,8 @@ class TaskState:
     worker_started: bool = False
     cancellation_requested: bool = False
     cleanup_done: bool = False
+    # Token-attribution scope captured from the enqueuing context (see above).
+    doc_token_scope: object = None
 
 
 @dataclass
@@ -762,6 +774,10 @@ def priority_limit_async_func_call(
                             queue.task_done()
                             continue
 
+                        # Restore the enqueuer's token-attribution scope so the
+                        # call is attributed to the right document (the worker's
+                        # own context is frozen and carries no scope).
+                        scope_token = doc_token_scope.set(task_state.doc_token_scope)
                         try:
                             # Execute function with timeout protection
                             if max_execution_timeout is not None:
@@ -801,6 +817,8 @@ def priority_limit_async_func_call(
                             if not task_state.future.done():
                                 task_state.future.set_exception(e)
                         finally:
+                            # Restore the worker's neutral scope for the next task.
+                            doc_token_scope.reset(scope_token)
                             # Clean up task state
                             async with task_states_lock:
                                 task_states.pop(task_id, None)
@@ -1015,10 +1033,13 @@ def priority_limit_async_func_call(
             task_id = f"{id(asyncio.current_task())}_{asyncio.get_event_loop().time()}"
             future = asyncio.Future()
 
-            # Create task state
+            # Create task state. Capture the token-attribution scope from THIS
+            # (enqueuing) context — the worker that runs the call has a frozen
+            # context and would otherwise see no scope.
             task_state = TaskState(
                 future=future, start_time=asyncio.get_event_loop().time()
             )
+            task_state.doc_token_scope = doc_token_scope.get()
 
             try:
                 # Register task state

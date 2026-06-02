@@ -6424,6 +6424,20 @@ TABLES = {
 	               CONSTRAINT LIGHTRAG_DOC_STATUS_PK PRIMARY KEY (workspace, id)
 	              )"""
     },
+    "LIGHTRAG_DOC_TOKEN_USAGE": {
+        "ddl": """CREATE TABLE LIGHTRAG_DOC_TOKEN_USAGE (
+                    workspace varchar(255) NOT NULL,
+                    id varchar(255) NOT NULL,
+                    prompt_tokens int8 NOT NULL DEFAULT 0,
+                    completion_tokens int8 NOT NULL DEFAULT 0,
+                    total_tokens int8 NOT NULL DEFAULT 0,
+                    llm_call_count int4 NOT NULL DEFAULT 0,
+                    llm_model varchar(255) NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT LIGHTRAG_DOC_TOKEN_USAGE_PK PRIMARY KEY (workspace, id)
+                    )"""
+    },
     "LIGHTRAG_FULL_ENTITIES": {
         "ddl": """CREATE TABLE LIGHTRAG_FULL_ENTITIES (
                     id VARCHAR(255),

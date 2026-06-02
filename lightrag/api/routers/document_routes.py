@@ -3150,6 +3150,67 @@ def create_document_routes(
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
 
+    @router.get(
+        "/token_usage/{doc_id}",
+        dependencies=[Depends(combined_auth)],
+    )
+    async def get_token_usage(doc_id: str, http_request: Request) -> dict:
+        """
+        Get the cumulative LLM token consumption of a single document's ingestion.
+
+        Tokens are attributed per doc_id during indexing (entity extraction,
+        gleaning, merge summaries) and exclude cache hits — they reflect real
+        billable consumption. The lookup is scoped to the request's workspace.
+
+        Args:
+            doc_id (str): The document id (e.g. "doc-xxxx") returned by track_status.
+
+        Returns:
+            dict: {doc_id, prompt_tokens, completion_tokens, total_tokens,
+                   llm_call_count, updated_at}. All counters are 0 and updated_at
+                   is null when no usage has been recorded yet.
+
+        Raises:
+            HTTPException: 400 if doc_id is empty, 500 on lookup error.
+        """
+        rag_instance = await _resolve_rag(http_request)
+        doc_id = (doc_id or "").strip()
+        if not doc_id:
+            raise HTTPException(status_code=400, detail="doc_id cannot be empty")
+
+        db = getattr(rag_instance.doc_status, "db", None)
+        if db is None:
+            raise HTTPException(
+                status_code=501,
+                detail="Token usage tracking requires the PostgreSQL backend",
+            )
+
+        try:
+            row = await db.query(
+                """
+                SELECT prompt_tokens, completion_tokens, total_tokens,
+                       llm_call_count, llm_model, updated_at
+                FROM LIGHTRAG_DOC_TOKEN_USAGE
+                WHERE workspace = $1 AND id = $2
+                """,
+                [rag_instance.workspace or "", doc_id],
+            )
+        except Exception as e:
+            logger.error(f"Error getting token usage for {doc_id}: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+        return {
+            "doc_id": doc_id,
+            "prompt_tokens": (row or {}).get("prompt_tokens", 0) or 0,
+            "completion_tokens": (row or {}).get("completion_tokens", 0) or 0,
+            "total_tokens": (row or {}).get("total_tokens", 0) or 0,
+            "llm_call_count": (row or {}).get("llm_call_count", 0) or 0,
+            "llm_model": (row or {}).get("llm_model"),
+            "updated_at": format_datetime((row or {}).get("updated_at"))
+            if row and row.get("updated_at")
+            else None,
+        }
+
     @router.post(
         "/paginated",
         response_model=PaginatedDocsResponse,
