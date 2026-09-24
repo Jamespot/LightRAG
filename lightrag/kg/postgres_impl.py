@@ -6659,33 +6659,48 @@ SQL_TEMPLATES = {
                       file_path=EXCLUDED.file_path,
                       update_time = EXCLUDED.update_time
                      """,
+    # MATERIALIZED: filter workspace first (btree), then exact kNN on that
+    # subset. A global HNSW on content_vector cannot apply workspace and
+    # would scan the whole table (~337k entities) then discard other KBs.
     "relationships": """
+                     WITH ws AS MATERIALIZED (
+                       SELECT source_id, target_id, content_vector, create_time
+                       FROM {table_name}
+                       WHERE workspace = $1
+                     )
                      SELECT source_id AS src_id,
                             target_id AS tgt_id,
                             EXTRACT(EPOCH FROM create_time)::BIGINT AS created_at
-                     FROM {table_name}
-                     WHERE workspace = $1
-                       AND content_vector <=> $4::{vector_cast} < $2
+                     FROM ws
+                     WHERE content_vector <=> $4::{vector_cast} < $2
                      ORDER BY content_vector <=> $4::{vector_cast}
                      LIMIT $3;
                      """,
     "entities": """
+                WITH ws AS MATERIALIZED (
+                  SELECT entity_name, content_vector, create_time
+                  FROM {table_name}
+                  WHERE workspace = $1
+                )
                 SELECT entity_name,
                        EXTRACT(EPOCH FROM create_time)::BIGINT AS created_at
-                FROM {table_name}
-                WHERE workspace = $1
-                  AND content_vector <=> $4::{vector_cast} < $2
+                FROM ws
+                WHERE content_vector <=> $4::{vector_cast} < $2
                 ORDER BY content_vector <=> $4::{vector_cast}
                 LIMIT $3;
                 """,
     "chunks": """
+              WITH ws AS MATERIALIZED (
+                SELECT id, content, file_path, content_vector, create_time
+                FROM {table_name}
+                WHERE workspace = $1
+              )
               SELECT id,
                      content,
                      file_path,
                      EXTRACT(EPOCH FROM create_time)::BIGINT AS created_at
-              FROM {table_name}
-              WHERE workspace = $1
-                AND content_vector <=> $4::{vector_cast} < $2
+              FROM ws
+              WHERE content_vector <=> $4::{vector_cast} < $2
               ORDER BY content_vector <=> $4::{vector_cast}
               LIMIT $3;
               """,
