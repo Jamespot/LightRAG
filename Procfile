@@ -1,1 +1,1 @@
-web: lightrag-gunicorn --workers 1
+web: bash scripts/scalingo/web.sh

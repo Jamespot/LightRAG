@@ -117,6 +117,14 @@ scalingo --app lightrag-safebrain-recette env-set \
   WORKSPACE=default \
   LIGHTRAG_API_KEY=<GENERER_UNE_CLE_FORTE_64_CHAR>
 
+# === New Relic (prod : safebrain-lightrag, région osc-secnum-fr1) ===
+# License key d'ingest du compte EU, pas la user API key (NRAK-…).
+# Sans cette variable, scripts/scalingo/web.sh lance lightrag-gunicorn seul.
+# Une clé EU est region-aware : l'agent choisit collector.eu01.nr-data.net.
+scalingo --region osc-secnum-fr1 --app safebrain-lightrag env-set \
+  NEW_RELIC_LICENSE_KEY=<LICENSE_KEY_INGEST> \
+  NEW_RELIC_APP_NAME=safebrain-lightrag
+
 # === Perf (peut s'ajuster sans redéploiement) ===
 # MAX_ASYNC = nb d'appels LLM concurrents (sémaphore global). Avec un modèle MoE
 # (qwen3.6:35b) on tient confortablement 8-16. NE PAS monter trop haut sur un
